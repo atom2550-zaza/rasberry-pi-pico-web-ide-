@@ -6,7 +6,7 @@
 #include <lwip/netif.h>
 #include <dhcpserver/dhcpserver.h>
 #include <WebSocketsServer.h>
-#include <Adafruit_Protomatter.h>
+#include <GFXMatrix.h>
 
 // --- HUB75 Configuration ---
 struct Hub75Pins {
@@ -19,7 +19,7 @@ struct Hub75Pins {
     int addr_count = 0;
 } hub75_pins;
 
-Adafruit_Protomatter* matrix = nullptr;
+GFXMatrix* matrix = nullptr;
 
 // --- Configuration ---
 const uint8_t mac[] = {0x02, 0x02, 0x84, 0x6A, 0x96, 0x00};
@@ -67,6 +67,22 @@ void log_to_web(String msg) {
     }
 }
 
+extern "C" void log_to_web_c(const char* msg) {
+    log_to_web(String(msg));
+    String str = String(msg);
+    webSocket.broadcastTXT(str);
+    Serial.print(msg);
+}
+
+// extern "C" void hub75_stop(){
+//         if (matrix) {
+//         matrix->fillScreen(0);
+//         matrix->display();
+//         delete matrix;
+//         matrix = nullptr;
+//     }
+// }
+    
 // --- WebSocket Event Handler ---
 void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
     (void)num; (void)type; (void)payload; (void)length;
@@ -92,6 +108,89 @@ int lua_digitalWrite(lua_State *L) {
     int val = luaL_checkinteger(L, 2);
     pinMode(pin, OUTPUT);
     digitalWrite(pin, val);
+
+    // Track used pins for cleanup
+    bool already_tracked = false;
+    for (int i = 0; i < used_pins_count; i++) {
+        if (used_pins[i] == pin) {
+            already_tracked = true;
+            break;
+        }
+    }
+    if (!already_tracked && used_pins_count < 40) {
+        used_pins[used_pins_count++] = pin;
+    }
+
+    return 0;
+}
+
+int lua_analogWrite(lua_State *L) {
+    int pin = luaL_checkinteger(L, 1);
+    int val = luaL_checkinteger(L, 2);
+    pinMode(pin, OUTPUT);
+    analogWrite(pin, val);
+
+    // Track used pins for cleanup
+    bool already_tracked = false;
+    for (int i = 0; i < used_pins_count; i++) {
+        if (used_pins[i] == pin) {
+            already_tracked = true;
+            break;
+        }
+    }
+    if (!already_tracked && used_pins_count < 40) {
+        used_pins[used_pins_count++] = pin;
+    }
+
+    return 0;
+}
+
+int lua_digitalRead(lua_State *L) {
+    int pin = luaL_checkinteger(L, 1);
+    pinMode(pin, INPUT);
+    int val = digitalRead(pin);
+
+    // Track used pins for cleanup
+    bool already_tracked = false;
+    for (int i = 0; i < used_pins_count; i++) {
+        if (used_pins[i] == pin) {
+            already_tracked = true;
+            break;
+        }
+    }
+    if (!already_tracked && used_pins_count < 40) {
+        used_pins[used_pins_count++] = pin;
+    }
+
+    lua_pushinteger(L, val);
+    return 1;
+}
+
+int lua_analogRead(lua_State *L) {
+    int pin = luaL_checkinteger(L, 1);
+    pinMode(pin, INPUT);
+    int val = analogRead(pin);
+
+    // Track used pins for cleanup
+    bool already_tracked = false;
+    for (int i = 0; i < used_pins_count; i++) {
+        if (used_pins[i] == pin) {
+            already_tracked = true;
+            break;
+        }
+    }
+    if (!already_tracked && used_pins_count < 40) {
+        used_pins[used_pins_count++] = pin;
+    }
+
+    lua_pushinteger(L, val);
+    return 1;
+}
+
+int lua_pinMode(lua_State *L) {
+    int pin = luaL_checkinteger(L, 1);
+    int mode = luaL_checkinteger(L, 2);
+    pinMode(pin, mode);
 
     // Track used pins for cleanup
     bool already_tracked = false;
@@ -134,44 +233,25 @@ void lua_hook(lua_State *L, lua_Debug *ar) {
 
 // --- HUB75 Lua Bindings ---
 
+extern "C" volatile uint32_t dma_irq_count;
+
+int lua_hub75_getIrqCount(lua_State *L) {
+    lua_pushinteger(L, dma_irq_count);
+    return 1;
+}
+
 int lua_hub75_setPins(lua_State *L) {
     if (!lua_istable(L, 1) || !lua_istable(L, 2)) {
         return luaL_error(L, "rgbPins and addrPins must be tables");
     }
-    int clk = luaL_checkinteger(L, 3);
-    int lat = luaL_checkinteger(L, 4);
-    int oe = luaL_checkinteger(L, 5);
+    (void)luaL_checkinteger(L, 3);
+    (void)luaL_checkinteger(L, 4);
+    (void)luaL_checkinteger(L, 5);
 
-    if (hub75_pins.rgb) {
-        delete[] hub75_pins.rgb;
-        hub75_pins.rgb = nullptr;
-    }
-    if (hub75_pins.addr) {
-        delete[] hub75_pins.addr;
-        hub75_pins.addr = nullptr;
-    }
-
-    int rgb_len = lua_rawlen(L, 1);
-    hub75_pins.rgb_count = rgb_len;
-    hub75_pins.rgb = new int[rgb_len];
-    for (int i = 1; i <= rgb_len; i++) {
-        lua_rawgeti(L, 1, i);
-        hub75_pins.rgb[i - 1] = luaL_checkinteger(L, -1);
-        lua_pop(L, 1);
-    }
-
-    int addr_len = lua_rawlen(L, 2);
-    hub75_pins.addr_count = addr_len;
-    hub75_pins.addr = new int[addr_len];
-    for (int i = 1; i <= addr_len; i++) {
-        lua_rawgeti(L, 2, i);
-        hub75_pins.addr[i - 1] = luaL_checkinteger(L, -1);
-        lua_pop(L, 1);
-    }
-
-    hub75_pins.clk = clk;
-    hub75_pins.lat = lat;
-    hub75_pins.oe = oe;
+    String msg = "Warning: RP2040Matrix uses strict PIO/DMA hardware pin mapping. Pins passed to setPins() are ignored.\n";
+    Serial.print(msg);
+    log_to_web(msg);
+    webSocket.broadcastTXT(msg);
 
     return 0;
 }
@@ -180,49 +260,15 @@ int lua_hub75_begin(lua_State *L) {
     int width = luaL_checkinteger(L, 1);
     int height = luaL_checkinteger(L, 2);
 
-    if (hub75_pins.rgb_count == 0 || hub75_pins.rgb == nullptr ||
-        hub75_pins.addr_count == 0 || hub75_pins.addr == nullptr ||
-        hub75_pins.clk == -1) {
-        return luaL_error(L, "HUB75 pins not configured. Call setPins first.");
-    }
-
     if (matrix) {
-        delete matrix;
+        matrix->clear();
+        matrix->display();
+        delete matrix;      // ~GFXMatrix() จะเรียก hub75_stop() จริงใน hub75.cpp
         matrix = nullptr;
     }
 
-    uint8_t* rgb_uint8 = new uint8_t[hub75_pins.rgb_count];
-    for (int i = 0; i < hub75_pins.rgb_count; i++) {
-        rgb_uint8[i] = (uint8_t)hub75_pins.rgb[i];
-    }
-    uint8_t* addr_uint8 = new uint8_t[hub75_pins.addr_count];
-    for (int i = 0; i < hub75_pins.addr_count; i++) {
-        addr_uint8[i] = (uint8_t)hub75_pins.addr[i];
-    }
-
-    matrix = new Adafruit_Protomatter(
-        width, 
-        4, 
-        hub75_pins.rgb_count / 6, 
-        rgb_uint8,
-        hub75_pins.addr_count,
-        addr_uint8,
-        (uint8_t)hub75_pins.clk,
-        (uint8_t)hub75_pins.lat,
-        (uint8_t)hub75_pins.oe,
-        true, 
-        height
-    );
-
-    ProtomatterStatus status = matrix->begin();
-    delete[] rgb_uint8;
-    delete[] addr_uint8;
-
-    if (status != PROTOMATTER_OK) {
-        delete matrix;
-        matrix = nullptr;
-        return luaL_error(L, "Failed to initialize HUB75 matrix");
-    }
+    matrix = new GFXMatrix(width, height);
+    matrix->begin();
 
     return 0;
 }
@@ -232,9 +278,13 @@ int lua_hub75_begin(lua_State *L) {
 int lua_hub75_show(lua_State *L) {
     (void)L;
     if (matrix) {
-        matrix->show();
+        matrix->display();
     }
     return 0;
+}
+
+uint16_t color565(uint8_t r, uint8_t g, uint8_t b) {
+    return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
 }
 
 int lua_hub75_fillScreen(lua_State *L) {
@@ -242,7 +292,7 @@ int lua_hub75_fillScreen(lua_State *L) {
     int g = luaL_checkinteger(L, 2);
     int b = luaL_checkinteger(L, 3);
     if (matrix) {
-        matrix->fillScreen(matrix->color565(r, g, b));
+        matrix->fillScreen(color565(r, g, b));
     }
     return 0;
 }
@@ -254,7 +304,7 @@ int lua_hub75_drawPixel(lua_State *L) {
     int g = luaL_checkinteger(L, 4);
     int b = luaL_checkinteger(L, 5);
     if (matrix) {
-        matrix->drawPixel(x, y, matrix->color565(r, g, b));
+        matrix->drawPixel(x, y, color565(r, g, b));
     }
     return 0;
 }
@@ -268,7 +318,7 @@ int lua_hub75_drawLine(lua_State *L) {
     int g = luaL_checkinteger(L, 6);
     int b = luaL_checkinteger(L, 7);
     if (matrix) {
-        matrix->drawLine(x0, y0, x1, y1, matrix->color565(r, g, b));
+        matrix->drawLine(x0, y0, x1, y1, color565(r, g, b));
     }
     return 0;
 }
@@ -282,7 +332,7 @@ int lua_hub75_drawRect(lua_State *L) {
     int g = luaL_checkinteger(L, 6);
     int b = luaL_checkinteger(L, 7);
     if (matrix) {
-        matrix->drawRect(x, y, w, h, matrix->color565(r, g, b));
+        matrix->drawRect(x, y, w, h, color565(r, g, b));
     }
     return 0;
 }
@@ -296,7 +346,7 @@ int lua_hub75_fillRect(lua_State *L) {
     int g = luaL_checkinteger(L, 6);
     int b = luaL_checkinteger(L, 7);
     if (matrix) {
-        matrix->fillRect(x, y, w, h, matrix->color565(r, g, b));
+        matrix->fillRect(x, y, w, h, color565(r, g, b));
     }
     return 0;
 }
@@ -309,7 +359,7 @@ int lua_hub75_drawCircle(lua_State *L) {
     int g = luaL_checkinteger(L, 5);
     int b = luaL_checkinteger(L, 6);
     if (matrix) {
-        matrix->drawCircle(x, y, radius, matrix->color565(r, g, b));
+        matrix->drawCircle(x, y, radius, color565(r, g, b));
     }
     return 0;
 }
@@ -322,7 +372,7 @@ int lua_hub75_fillCircle(lua_State *L) {
     int g = luaL_checkinteger(L, 5);
     int b = luaL_checkinteger(L, 6);
     if (matrix) {
-        matrix->fillCircle(x, y, radius, matrix->color565(r, g, b));
+        matrix->fillCircle(x, y, radius, color565(r, g, b));
     }
     return 0;
 }
@@ -335,7 +385,7 @@ int lua_hub75_drawString(lua_State *L) {
     int g = luaL_checkinteger(L, 5);
     int b = luaL_checkinteger(L, 6);
     if (matrix) {
-        matrix->setTextColor(matrix->color565(r, g, b));
+        matrix->setTextColor(color565(r, g, b));
         matrix->setCursor(x, y);
         matrix->print(text);
     }
@@ -343,26 +393,41 @@ int lua_hub75_drawString(lua_State *L) {
 }
 
 void run_lua(String code) {
+    Serial.println("[run_lua] START");
     is_running = true;
     stop_requested = false;
     lua_State *L = luaL_newstate();
     if (!L) {
+        Serial.println("[run_lua] Lua State FAIL");
         log_to_web("Error: Lua State Fail\n");
         is_running = false;
         return;
     }
+    Serial.println("[run_lua] Lua State OK");
     luaL_openlibs(L);
+    Serial.println("[run_lua] libs opened");
     lua_register(L, "print", lua_print);
     lua_register(L, "digitalWrite", lua_digitalWrite);
+    lua_register(L, "analogWrite", lua_analogWrite);
+    lua_register(L, "digitalRead", lua_digitalRead);
+    lua_register(L, "analogRead", lua_analogRead);
+    lua_register(L, "pinMode", lua_pinMode);
     lua_register(L, "delay", lua_delay);
     lua_pushinteger(L, HIGH); lua_setglobal(L, "HIGH");
     lua_pushinteger(L, LOW); lua_setglobal(L, "LOW");
     lua_pushinteger(L, LED_BUILTIN); lua_setglobal(L, "LED_BUILTIN");
+    lua_pushinteger(L, INPUT); lua_setglobal(L, "INPUT");
+    lua_pushinteger(L, OUTPUT); lua_setglobal(L, "OUTPUT");
+    lua_pushinteger(L, INPUT_PULLUP); lua_setglobal(L, "INPUT_PULLUP");
+    lua_pushinteger(L, INPUT_PULLDOWN); lua_setglobal(L, "INPUT_PULLDOWN");
+    Serial.println("[run_lua] globals registered");
     
     // Register hub75 module
     lua_newtable(L);
+    Serial.println("[run_lua] hub75 table created");
     lua_pushcfunction(L, lua_hub75_setPins); lua_setfield(L, -2, "setPins");
     lua_pushcfunction(L, lua_hub75_begin); lua_setfield(L, -2, "begin");
+    lua_pushcfunction(L, lua_hub75_getIrqCount); lua_setfield(L, -2, "getIrqCount");
     lua_pushcfunction(L, lua_hub75_show); lua_setfield(L, -2, "show");
     lua_pushcfunction(L, lua_hub75_fillScreen); lua_setfield(L, -2, "fillScreen");
     lua_pushcfunction(L, lua_hub75_drawPixel); lua_setfield(L, -2, "drawPixel");
@@ -373,14 +438,15 @@ void run_lua(String code) {
     lua_pushcfunction(L, lua_hub75_fillCircle); lua_setfield(L, -2, "fillCircle");
     lua_pushcfunction(L, lua_hub75_drawString); lua_setfield(L, -2, "drawString");
     lua_setglobal(L, "hub75");
-
+    Serial.println("[run_lua] hub75 registered");
     lua_sethook(L, lua_hook, LUA_MASKCOUNT, 100);
-
+    Serial.println("[run_lua] calling dostring");
     log_to_web("--- [" + current_file + "] Start ---\n");
     unsigned long start_time = millis();
     if (luaL_dostring(L, code.c_str())) {
         log_to_web("Lua Error: " + String(lua_tostring(L, -1)) + "\n");
     }
+    Serial.println("[run_lua] dostring done");
     last_execution_time = millis() - start_time;
     log_to_web("--- [" + current_file + "] End ---\n");
     
@@ -391,24 +457,13 @@ void run_lua(String code) {
     }
     used_pins_count = 0;
 
-    // Cleanup HUB75 matrix
-    if (matrix) {
+    // Cleanup HUB75 matrix (Only if explicitly stopped by user)
+    if (stop_requested && matrix) {
+        matrix->clear();
+        matrix->display();
         delete matrix;
         matrix = nullptr;
     }
-    if (hub75_pins.rgb) {
-        delete[] hub75_pins.rgb;
-        hub75_pins.rgb = nullptr;
-    }
-    if (hub75_pins.addr) {
-        delete[] hub75_pins.addr;
-        hub75_pins.addr = nullptr;
-    }
-    hub75_pins.rgb_count = 0;
-    hub75_pins.addr_count = 0;
-    hub75_pins.clk = -1;
-    hub75_pins.lat = -1;
-    hub75_pins.oe = -1;
 
     lua_close(L);
     is_running = false;
@@ -465,6 +520,7 @@ const char index_html[] PROGMEM = R"rawliteral(
         .api-param-item { display: inline-block; margin-right: 15px; }
         .api-param-name { font-weight: 600; color: #b45309; font-family: monospace; }
         .api-param-type { color: #059669; font-family: monospace; font-size: 11px; }
+        .badge-incomplete { color: #ef4444; font-size: 11px; margin-left: 10px; background: #fee2e9; padding: 2px 8px; border-radius: 10px; font-weight: bold; border: 1px solid #fca5a5; }
     </style>
 </head>
 <body>
@@ -523,6 +579,40 @@ const char index_html[] PROGMEM = R"rawliteral(
                     </div>
 
                     <div class="api-item">
+                        <div class="api-signature">analogWrite(pin, val)</div>
+                        <div class="api-desc">Sends a PWM signal (0-255) to a GPIO pin. Useful for fading LEDs.</div>
+                        <div class="api-params">
+                            <span class="api-param-item"><span class="api-param-name">pin</span> <span class="api-param-type">number</span> - GPIO pin number (e.g. 0-29)</span>
+                            <span class="api-param-item"><span class="api-param-name">val</span> <span class="api-param-type">number</span> - PWM value (0 to 255)</span>
+                        </div>
+                    </div>
+
+                    <div class="api-item">
+                        <div class="api-signature">digitalRead(pin)</div>
+                        <div class="api-desc">Reads the digital state of a GPIO pin (returns HIGH/1 or LOW/0).</div>
+                        <div class="api-params">
+                            <span class="api-param-item"><span class="api-param-name">pin</span> <span class="api-param-type">number</span> - GPIO pin number</span>
+                        </div>
+                    </div>
+
+                    <div class="api-item">
+                        <div class="api-signature">analogRead(pin)</div>
+                        <div class="api-desc">Reads the analog voltage value on an ADC pin (returns 0-1023).</div>
+                        <div class="api-params">
+                            <span class="api-param-item"><span class="api-param-name">pin</span> <span class="api-param-type">number</span> - ADC pin number (e.g. 26-28)</span>
+                        </div>
+                    </div>
+
+                    <div class="api-item">
+                        <div class="api-signature">pinMode(pin, mode)</div>
+                        <div class="api-desc">Configures the input/output mode of a GPIO pin.</div>
+                        <div class="api-params">
+                            <span class="api-param-item"><span class="api-param-name">pin</span> <span class="api-param-type">number</span> - GPIO pin number</span>
+                            <span class="api-param-item"><span class="api-param-name">mode</span> <span class="api-param-type">number</span> - Mode (INPUT, OUTPUT, INPUT_PULLUP, INPUT_PULLDOWN)</span>
+                        </div>
+                    </div>
+
+                    <div class="api-item">
                         <div class="api-signature">delay(ms)</div>
                         <div class="api-desc">Pauses the execution of the script for a specified duration of milliseconds.</div>
                         <div class="api-params">
@@ -536,13 +626,17 @@ const char index_html[] PROGMEM = R"rawliteral(
                         <div class="api-params" style="border:none; padding:0; margin:0;">
                             <span class="api-param-item"><span class="api-param-name">HIGH</span> <span class="api-param-type">1</span></span>
                             <span class="api-param-item"><span class="api-param-name">LOW</span> <span class="api-param-type">0</span></span>
-                            <span class="api-param-item"><span class="api-param-name">LED_BUILTIN</span> <span class="api-param-type">25</span> - Built-in LED pin</span>
+                            <span class="api-param-item"><span class="api-param-name">LED_BUILTIN</span> <span class="api-param-type">25</span></span>
+                            <span class="api-param-item"><span class="api-param-name">INPUT</span> <span class="api-param-type">0</span></span>
+                            <span class="api-param-item"><span class="api-param-name">OUTPUT</span> <span class="api-param-type">1</span></span>
+                            <span class="api-param-item"><span class="api-param-name">INPUT_PULLUP</span> <span class="api-param-type">2</span></span>
+                            <span class="api-param-item"><span class="api-param-name">INPUT_PULLDOWN</span> <span class="api-param-type">3</span></span>
                         </div>
                     </div>
                 </div>
 
                 <div class="api-section">
-                    <div class="api-section-title">hub75 Module (HUB75 RGB LED Matrix 64x64)</div>
+                    <div class="api-section-title" style="display: flex; align-items: center;">hub75 Module (HUB75 RGB LED Matrix 64x64) <span class="badge-incomplete">INCOMPLETE</span></div>
 
                     <div class="api-item">
                         <div class="api-signature">hub75.setPins(rgbTable, addrTable, clk, lat, oe)</div>
@@ -785,6 +879,7 @@ void handleDelete() { String path = server.arg("path"); if (LittleFS.remove(path
 void handleRun() {
     lua_code_pending = server.arg("plain");
     run_requested = true;
+    Serial.println("[handleRun] called, code length=" + String(lua_code_pending.length()));
     server.send(200, "text/plain", "OK");
 }
 void handleStop() { stop_requested = true; server.send(200, "text/plain", "Stop Issued"); }
